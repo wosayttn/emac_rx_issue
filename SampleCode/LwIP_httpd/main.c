@@ -178,8 +178,8 @@ static void net_init(void)
 
 #else
 
-    IP4_ADDR(&gw, 192, 168, 0, 1);
-    IP4_ADDR(&ipaddr, 192, 168, 0, 227);
+    IP4_ADDR(&gw, 192, 168, 1, 1);
+    IP4_ADDR(&ipaddr, 192, 168, 1, 227);
     IP4_ADDR(&netmask, 255, 255, 255, 0);
 
 #endif
@@ -200,7 +200,8 @@ static void net_init(void)
 
 int main(void)
 {
-
+		int counter=0;
+	
     // Disable all interrupts.
     outpw(REG_AIC_MDCR, 0xFFFFFFFE);
     outpw(REG_AIC_MDCRH, 0x3FFFFFFF);
@@ -210,10 +211,18 @@ int main(void)
     sysEnableCache(CACHE_WRITE_BACK);
     sysInitializeUART();
     
+		sysprintf("[%s %d]\r\n", __func__, __LINE__);
     net_init();
-    httpd_init();
+//		sysprintf("[%s %d]\r\n", __func__, __LINE__);
+//    httpd_init();
+//		sysprintf("[%s %d]\r\n", __func__, __LINE__);
 
     while (1)
-        sys_check_timeouts();  // All network traffic is handled in interrupt handler
+    {
+			//sysprintf("[%s %d]\r\n", __func__, __LINE__);
+			ETH0_RX_NAPI_SIM ();
+			sys_check_timeouts();  // All network traffic is handled in interrupt handler
+			if((counter++)%1000==999) print_stat();
+		}
 }
 

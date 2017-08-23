@@ -92,13 +92,18 @@ static int reset_phy(void)
         sysprintf("Reset phy failed\n");
         return(-1);
     }
-
+#if 1
     mdio_write(CONFIG_PHY_ADDR, MII_ADVERTISE, ADVERTISE_CSMA |
                ADVERTISE_10HALF |
                ADVERTISE_10FULL |
                ADVERTISE_100HALF |
                ADVERTISE_100FULL);
-
+#else
+		    mdio_write(CONFIG_PHY_ADDR, MII_ADVERTISE, ADVERTISE_CSMA |
+               ADVERTISE_10HALF |
+               ADVERTISE_10FULL );
+#endif
+		
     reg = mdio_read(CONFIG_PHY_ADDR, MII_BMCR);
     mdio_write(CONFIG_PHY_ADDR, MII_BMCR, reg | BMCR_ANRESTART);
 
@@ -193,37 +198,100 @@ void ETH0_halt(void)
     
 }
 
-void ETH0_RX_IRQHandler(void)
+//Wayne
+#define DEF_NAPI_RX_WEIGHT	16
+#define DEF_NAPI_RX_STABLE	0
+
+volatile int napi_sechdule  =0; 
+volatile int g_rx_packet_count=0;
+volatile int g_rx_interrupt_count=0;
+volatile int g_rx_packet_size=0;
+
+void CPU_Delay(int count)
+{
+	volatile int i;
+	for(i=0;i<count;i++);
+}
+void ETH0_RX_NAPI_SIM (void)
 {
     unsigned int status;
+		int rx_counter=0;
+		int complete=0;
 
-    status = inpw(REG_EMAC0_MISTA) & 0xFFFF;
+		if ( napi_sechdule == 0 ) return;
+    
+    while ( rx_counter < DEF_NAPI_RX_WEIGHT ) {
+			
+        status = cur_rx_desc_ptr->status1;
+        if ( (status & OWNERSHIP_EMAC) == OWNERSHIP_EMAC )
+        {
+					// No have avaiable RX packet in Ring buffer
+					complete=1;
+					break;
+				}
+
+				rx_counter++;
+        if ( status & RXFD_RXGD ) {
+						int length = status & 0xFFFF;
+            ethernetif_input0(length, cur_rx_desc_ptr->buf);	
+						CPU_Delay(10000);
+						g_rx_packet_count++;		
+						g_rx_packet_size += length;
+        }
+
+				// Change owner to Emac
+        cur_rx_desc_ptr->status1 = OWNERSHIP_EMAC;
+        cur_rx_desc_ptr = cur_rx_desc_ptr->next;
+#if !DEF_NAPI_RX_STABLE
+				// Trigger EMAC RX frquently.
+//				ETH0_TRIGGER_RX(); //Crash
+#endif
+    }
+
+		if ( complete==1 )
+		{
+				napi_sechdule = 0;
+				outpw ( REG_EMAC0_MIEN, inpw(REG_EMAC0_MIEN) | (0x1) );			// Enable interrupt
+#if DEF_NAPI_RX_STABLE
+				// Workaround: Trigger EMAC RX after processing packets in ring buffer.
+				// Disavatage It is more RX interrupts.
+				ETH0_TRIGGER_RX(); // Work fine
+#endif
+		}
+				
+ETH0_RX_DONE:
+#if !DEF_NAPI_RX_STABLE		
+		ETH0_TRIGGER_RX();//Original code
+#endif
+}
+
+void ETH0_RX_IRQHandler(void)
+{
+	  unsigned int status;
+    
+		status = inpw(REG_EMAC0_MISTA) & 0xFFFF;
     outpw(REG_EMAC0_MISTA, status);
     
     if (status & 0x800) {
         // Shouldn't goes here, unless descriptor corrupted
     }
+				
+		// Disable interrupt
+    outpw(REG_EMAC0_MIEN, inpw(REG_EMAC0_MIEN) & ~(0x01) ); 
+		
+		g_rx_interrupt_count++;
+		napi_sechdule = 1;
+}
 
-    do {
-        status = cur_rx_desc_ptr->status1;
+static int last_int=0;
+void print_stat()
+{
 
-        if(status & OWNERSHIP_EMAC)
-            break;
+	if(g_rx_interrupt_count!=last_int)
+		sysprintf("RX_INT=%d, packet=%d, size=%d bytes\r\n", g_rx_interrupt_count, g_rx_packet_count, g_rx_packet_size );	
 
-        if (status & RXFD_RXGD) {
-
-            ethernetif_input0(status & 0xFFFF, cur_rx_desc_ptr->buf);
-
-
-        }
-
-        cur_rx_desc_ptr->status1 = OWNERSHIP_EMAC;
-        cur_rx_desc_ptr = cur_rx_desc_ptr->next;
-
-    } while (1);
-
-    ETH0_TRIGGER_RX();
-
+	last_int=g_rx_interrupt_count;
+	
 }
 
 void ETH0_TX_IRQHandler(void)
