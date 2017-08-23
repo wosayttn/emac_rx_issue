@@ -196,7 +196,8 @@ static void net_init(void)
 #endif
 }
 
-
+void ETH0_RX_NAPI_SIM(void);
+void print_stat();
 
 int main(void)
 {
@@ -210,19 +211,28 @@ int main(void)
     sysFlushCache(I_D_CACHE);
     sysEnableCache(CACHE_WRITE_BACK);
     sysInitializeUART();
-    
+
+		sysprintf("APLL    clock %d MHz\n", sysGetClock(SYS_APLL));
+		sysprintf("UPLL    clock %d MHz\n", sysGetClock(SYS_UPLL));
+		sysprintf("CPU     clock %d MHz\n", sysGetClock(SYS_CPU));
+		sysprintf("System  clock %d MHz\n", sysGetClock(SYS_SYSTEM));
+		sysprintf("HCLK1   clock %d MHz\n", sysGetClock(SYS_HCLK1));
+		sysprintf("HCLK234 clock %d MHz\n", sysGetClock(SYS_HCLK234));
+		sysprintf("PCLK    clock %d MHz\n", sysGetClock(SYS_PCLK));
+	
+		sysprintf("\n\n Hello NUC970 !!!, EMAC RX testing.\n");	
+		
 		sysprintf("[%s %d]\r\n", __func__, __LINE__);
     net_init();
-//		sysprintf("[%s %d]\r\n", __func__, __LINE__);
-//    httpd_init();
-//		sysprintf("[%s %d]\r\n", __func__, __LINE__);
+    httpd_init();
+		sysprintf("[%s %d]\r\n", __func__, __LINE__);
 
     while (1)
     {
-			//sysprintf("[%s %d]\r\n", __func__, __LINE__);
-			ETH0_RX_NAPI_SIM ();
-			sys_check_timeouts();  // All network traffic is handled in interrupt handler
-			if((counter++)%1000==999) print_stat();
+			ETH0_RX_NAPI_SIM ();		// All network traffic is handled in here.
+			sys_check_timeouts(); 
+			if((counter++)%1000==999) 
+						print_stat();
 		}
 }
 

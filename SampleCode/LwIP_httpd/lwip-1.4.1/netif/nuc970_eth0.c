@@ -35,17 +35,33 @@
 #define ETH0_DISABLE_TX()    outpw(REG_EMAC0_MCMDR, inpw(REG_EMAC0_MCMDR) & ~0x100)
 #define ETH0_DISABLE_RX()    outpw(REG_EMAC0_MCMDR, inpw(REG_EMAC0_MCMDR) & ~0x1)
 
+#define DEF_USE_SRAM 	1
+#define REG_SRAM_ADDR	0xBC000000
+#define REG_SRAM_ADDR_RX_DESCRIPTOR	REG_SRAM_ADDR
+#define REG_SRAM_ADDR_RX_DATABUF   	(REG_SRAM_ADDR | 0x1000)
+
 #ifdef __ICCARM__
 #pragma data_alignment=4
 static struct eth_descriptor rx_desc[RX_DESCRIPTOR_NUM];
 static struct eth_descriptor tx_desc[TX_DESCRIPTOR_NUM];
 #else
-static struct eth_descriptor rx_desc[RX_DESCRIPTOR_NUM] __attribute__ ((aligned(4)));
+
+#if DEF_USE_SRAM
+	static struct eth_descriptor* rx_desc = (struct eth_descriptor*)REG_SRAM_ADDR_RX_DESCRIPTOR;
+#else
+	static struct eth_descriptor rx_desc[RX_DESCRIPTOR_NUM] __attribute__ ((aligned(4)));
+#endif
+
 static struct eth_descriptor tx_desc[TX_DESCRIPTOR_NUM] __attribute__ ((aligned(4)));
 #endif
 static struct eth_descriptor volatile *cur_tx_desc_ptr, *cur_rx_desc_ptr, *fin_tx_desc_ptr;
 
-static u8_t rx_buf[RX_DESCRIPTOR_NUM][PACKET_BUFFER_SIZE];
+#if DEF_USE_SRAM
+	static u8_t* rx_buf = (u8_t*)REG_SRAM_ADDR_RX_DATABUF;
+#else
+	static u8_t rx_buf[RX_DESCRIPTOR_NUM][PACKET_BUFFER_SIZE];
+#endif
+
 static u8_t tx_buf[TX_DESCRIPTOR_NUM][PACKET_BUFFER_SIZE];
 static int plugged = 0;
 
@@ -168,9 +184,14 @@ static void init_rx_desc(void)
 
     for(i = 0; i < RX_DESCRIPTOR_NUM; i++) {
         rx_desc[i].status1 = OWNERSHIP_EMAC;
+#if DEF_USE_SRAM
+        rx_desc[i].buf = (unsigned char *)((UINT)(&rx_buf[i*PACKET_BUFFER_SIZE]));
+#else
         rx_desc[i].buf = (unsigned char *)((UINT)(&rx_buf[i][0]) | 0x80000000);
+#endif
         rx_desc[i].status2 = 0;
         rx_desc[i].next = (struct eth_descriptor *)((UINT)(&rx_desc[(i + 1) % RX_DESCRIPTOR_NUM]) | 0x80000000);
+				sysprintf("[%s]No.%d RX descriptor is at 0x%x, buf at 0x%x\n", __func__, i, (unsigned int)&rx_desc[i], rx_desc[i].buf );
     }
     outpw(REG_EMAC0_RXDLSA, (unsigned int)&rx_desc[0] | 0x80000000);
     return;
@@ -199,19 +220,69 @@ void ETH0_halt(void)
 }
 
 //Wayne
-#define DEF_NAPI_RX_WEIGHT	16
+#define DEF_NAPI_RX_WEIGHT	2
 #define DEF_NAPI_RX_STABLE	0
 
 volatile int napi_sechdule  =0; 
 volatile int g_rx_packet_count=0;
+volatile int g_rx_bad_packet_count=0;
+volatile int g_rxov=0;
 volatile int g_rx_interrupt_count=0;
 volatile int g_rx_packet_size=0;
 
-void CPU_Delay(int count)
+int isCRSBSAInRange( void )
+{
+	int hit=0, i;
+	unsigned int uiCurCRSBSA=inpw(REG_EMAC0_CRXBSA);
+	for (i=0;i<RX_DESCRIPTOR_NUM;i++)
+	{
+		if ( uiCurCRSBSA == (unsigned int)rx_desc[i].buf )
+		{
+			hit=1;
+			break;
+		}
+	}
+	if(!hit)	{
+			sysprintf("CUR REG_EMAC0_CRXBSA(0x%X) is not in range.\r\n", uiCurCRSBSA );			
+	}	
+	return hit;
+}
+
+int isCRSDSAInRange( void )
+{
+	int hit=0, i;
+	unsigned int uiCurCRSDSA=inpw(REG_EMAC0_CRXDSA);
+	for (i=0;i<RX_DESCRIPTOR_NUM;i++)
+	{
+		if ( uiCurCRSDSA == (unsigned int)&rx_desc[i] )
+		{
+			hit=1;
+			break;
+		}
+	}
+	if(!hit)	{
+			sysprintf("CUR REG_EMAC0_CRXDSA(0x%X) is not in range.\r\n", uiCurCRSDSA );			
+	}	
+	return hit;
+}
+
+void CPU_Delay()
 {
 	volatile int i;
-	for(i=0;i<count;i++);
+	if ( sysGetClock(SYS_CPU) < 100 )	//For FPGA
+			for(i=0;i<2000;i++);
+	else
+		for(i=0;i<10000;i++);
 }
+
+static int last_int=0;
+void print_stat()
+{
+	if(g_rx_interrupt_count!=last_int)
+		sysprintf("RX_INT=%d, packet=%d,%d size=%d bytes, g_rxov=%d\r\n", g_rx_interrupt_count, g_rx_packet_count, g_rx_bad_packet_count, g_rx_packet_size, g_rxov );		
+	last_int=g_rx_interrupt_count;
+}
+
 void ETH0_RX_NAPI_SIM (void)
 {
     unsigned int status;
@@ -234,35 +305,56 @@ void ETH0_RX_NAPI_SIM (void)
         if ( status & RXFD_RXGD ) {
 						int length = status & 0xFFFF;
             ethernetif_input0(length, cur_rx_desc_ptr->buf);	
-						CPU_Delay(10000);
+						CPU_Delay();
 						g_rx_packet_count++;		
 						g_rx_packet_size += length;
-        }
+        } else
+					g_rx_bad_packet_count++;
 
 				// Change owner to Emac
         cur_rx_desc_ptr->status1 = OWNERSHIP_EMAC;
         cur_rx_desc_ptr = cur_rx_desc_ptr->next;
-#if !DEF_NAPI_RX_STABLE
-				// Trigger EMAC RX frquently.
-//				ETH0_TRIGGER_RX(); //Crash
-#endif
+
+				#if !DEF_NAPI_RX_STABLE
+				// Trigger EMAC RX frequently after changing owner to EMAC.
+				//ETH0_TRIGGER_RX(); //Crash
+				#endif
+
     }
 
+		// All packets are processed.
 		if ( complete==1 )
 		{
 				napi_sechdule = 0;
 				outpw ( REG_EMAC0_MIEN, inpw(REG_EMAC0_MIEN) | (0x1) );			// Enable interrupt
+
 #if DEF_NAPI_RX_STABLE
-				// Workaround: Trigger EMAC RX after processing packets in ring buffer.
-				// Disavatage It is more RX interrupts.
+				// Workaround: Trigger EMAC RX after processing all packets in ring buffer.
+				// Disadvantage: It need more RX interrupts, lower throughput.
 				ETH0_TRIGGER_RX(); // Work fine
 #endif
-		}
-				
+		}	
+
 ETH0_RX_DONE:
-#if !DEF_NAPI_RX_STABLE		
+#if !DEF_NAPI_RX_STABLE
+		{
+		  unsigned int mista_status;
+			mista_status = inpw(REG_EMAC0_MISTA) & 0xFFFF;
+			if ( mista_status&(0x1<<2) )	//RXOV
+			{
+				g_rxov++;
+//				sysprintf("RXOV!!\n");
+				outpw(REG_EMAC0_MISTA, mista_status);
+			}
+		}
 		ETH0_TRIGGER_RX();//Original code
 #endif
+	if ( !isCRSBSAInRange() || !isCRSDSAInRange() )
+	{
+		print_stat();
+		sysprintf("Bye!!\n");
+		while(1);
+	}
 }
 
 void ETH0_RX_IRQHandler(void)
@@ -283,16 +375,7 @@ void ETH0_RX_IRQHandler(void)
 		napi_sechdule = 1;
 }
 
-static int last_int=0;
-void print_stat()
-{
 
-	if(g_rx_interrupt_count!=last_int)
-		sysprintf("RX_INT=%d, packet=%d, size=%d bytes\r\n", g_rx_interrupt_count, g_rx_packet_count, g_rx_packet_size );	
-
-	last_int=g_rx_interrupt_count;
-	
-}
 
 void ETH0_TX_IRQHandler(void)
 {
