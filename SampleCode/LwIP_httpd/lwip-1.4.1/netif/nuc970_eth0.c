@@ -1,3 +1,9 @@
+//Wayne
+#define DEF_NAPI_RX_WEIGHT	(RX_DESCRIPTOR_NUM/2)
+#define DEF_NAPI_RX_STABLE	0
+#define DEF_USE_SRAM 				0
+#define DEF_TEST_FPGA				0
+
 /*
  * Copyright (c) 2015 Nuvoton Technology Corp.
  *
@@ -35,7 +41,6 @@
 #define ETH0_DISABLE_TX()    outpw(REG_EMAC0_MCMDR, inpw(REG_EMAC0_MCMDR) & ~0x100)
 #define ETH0_DISABLE_RX()    outpw(REG_EMAC0_MCMDR, inpw(REG_EMAC0_MCMDR) & ~0x1)
 
-#define DEF_USE_SRAM 	1
 #define REG_SRAM_ADDR	0xBC000000
 #define REG_SRAM_ADDR_RX_DESCRIPTOR	REG_SRAM_ADDR
 #define REG_SRAM_ADDR_RX_DATABUF   	(REG_SRAM_ADDR | 0x1000)
@@ -219,10 +224,6 @@ void ETH0_halt(void)
     
 }
 
-//Wayne
-#define DEF_NAPI_RX_WEIGHT	2
-#define DEF_NAPI_RX_STABLE	0
-
 volatile int napi_sechdule  =0; 
 volatile int g_rx_packet_count=0;
 volatile int g_rx_bad_packet_count=0;
@@ -236,15 +237,15 @@ int isCRSBSAInRange( void )
 	unsigned int uiCurCRSBSA=inpw(REG_EMAC0_CRXBSA);
 	for (i=0;i<RX_DESCRIPTOR_NUM;i++)
 	{
-		if ( uiCurCRSBSA == (unsigned int)rx_desc[i].buf )
+		if ( uiCurCRSBSA == ((unsigned int)rx_desc[i].buf| 0x80000000) )
 		{
 			hit=1;
 			break;
 		}
 	}
-	if(!hit)	{
-			sysprintf("CUR REG_EMAC0_CRXBSA(0x%X) is not in range.\r\n", uiCurCRSBSA );			
-	}	
+	if(!hit)
+			sysprintf("CURRENT REG_EMAC0_CRXBSA(0x%X) is not in range.\r\n", uiCurCRSBSA );	
+	
 	return hit;
 }
 
@@ -254,25 +255,22 @@ int isCRSDSAInRange( void )
 	unsigned int uiCurCRSDSA=inpw(REG_EMAC0_CRXDSA);
 	for (i=0;i<RX_DESCRIPTOR_NUM;i++)
 	{
-		if ( uiCurCRSDSA == (unsigned int)&rx_desc[i] )
+		if ( uiCurCRSDSA == ((unsigned int)&rx_desc[i]| 0x80000000) )
 		{
 			hit=1;
 			break;
 		}
 	}
-	if(!hit)	{
-			sysprintf("CUR REG_EMAC0_CRXDSA(0x%X) is not in range.\r\n", uiCurCRSDSA );			
-	}	
+	if(!hit)
+			sysprintf("CURRENT REG_EMAC0_CRXDSA(0x%X) is not in range.\r\n", uiCurCRSDSA );	
+	
 	return hit;
 }
 
 void CPU_Delay()
 {
 	volatile int i;
-	if ( sysGetClock(SYS_CPU) < 100 )	//For FPGA
-			for(i=0;i<2000;i++);
-	else
-		for(i=0;i<10000;i++);
+	for(i=0;i<10000;i++);
 }
 
 static int last_int=0;
@@ -304,8 +302,15 @@ void ETH0_RX_NAPI_SIM (void)
 				rx_counter++;
         if ( status & RXFD_RXGD ) {
 						int length = status & 0xFFFF;
-            ethernetif_input0(length, cur_rx_desc_ptr->buf);	
-						CPU_Delay();
+						#if DEF_TEST_FPGA
+							//Fast it
+							if ( (g_rx_packet_count%3) ==0)
+								ethernetif_input0(length, cur_rx_desc_ptr->buf);	
+						#else
+							ethernetif_input0(length, cur_rx_desc_ptr->buf);	
+						//Slow it
+							CPU_Delay();
+						#endif
 						g_rx_packet_count++;		
 						g_rx_packet_size += length;
         } else
@@ -317,9 +322,8 @@ void ETH0_RX_NAPI_SIM (void)
 
 				#if !DEF_NAPI_RX_STABLE
 				// Trigger EMAC RX frequently after changing owner to EMAC.
-				//ETH0_TRIGGER_RX(); //Crash
+				ETH0_TRIGGER_RX(); //Crash
 				#endif
-
     }
 
 		// All packets are processed.
@@ -337,6 +341,7 @@ void ETH0_RX_NAPI_SIM (void)
 
 ETH0_RX_DONE:
 #if !DEF_NAPI_RX_STABLE
+		if(0)
 		{
 		  unsigned int mista_status;
 			mista_status = inpw(REG_EMAC0_MISTA) & 0xFFFF;
@@ -349,10 +354,10 @@ ETH0_RX_DONE:
 		}
 		ETH0_TRIGGER_RX();//Original code
 #endif
-	if ( !isCRSBSAInRange() || !isCRSDSAInRange() )
+	if ( !isCRSDSAInRange() || !isCRSBSAInRange() )
 	{
 		print_stat();
-		sysprintf("Bye!!\n");
+		sysprintf("!!!!!!!!!!!!!!!!  Bye!! !!!!!!!!!!!!!!!!!!!!!!!\n");
 		while(1);
 	}
 }
