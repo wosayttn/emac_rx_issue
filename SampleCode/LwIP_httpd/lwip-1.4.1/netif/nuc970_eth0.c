@@ -1,8 +1,9 @@
 //Wayne
-#define DEF_NAPI_RX_WEIGHT	(RX_DESCRIPTOR_NUM/2)
-#define DEF_NAPI_RX_STABLE	0
-#define DEF_USE_SRAM 				0
-#define DEF_TEST_FPGA				0
+#define DEF_NAPI_RX_WEIGHT			(RX_DESCRIPTOR_NUM/2)
+#define DEF_NAPI_RX_STABLE			0
+#define DEF_USE_SRAM 						0
+#define DEF_TEST_FPGA						1
+#define DEF_SPECIFY_DRAM_ADDR 	0x83FFC000
 
 /*
  * Copyright (c) 2015 Nuvoton Technology Corp.
@@ -41,9 +42,11 @@
 #define ETH0_DISABLE_TX()    outpw(REG_EMAC0_MCMDR, inpw(REG_EMAC0_MCMDR) & ~0x100)
 #define ETH0_DISABLE_RX()    outpw(REG_EMAC0_MCMDR, inpw(REG_EMAC0_MCMDR) & ~0x1)
 
-#define REG_SRAM_ADDR	0xBC000000
-#define REG_SRAM_ADDR_RX_DESCRIPTOR	REG_SRAM_ADDR
-#define REG_SRAM_ADDR_RX_DATABUF   	(REG_SRAM_ADDR | 0x1000)
+#if DEF_USE_SRAM
+	#define REG_SRAM_ADDR	0xBC000000
+	#define REG_SRAM_ADDR_RX_DESCRIPTOR	REG_SRAM_ADDR
+	#define REG_SRAM_ADDR_RX_DATABUF   	(REG_SRAM_ADDR | 0x1000)
+#endif
 
 #ifdef __ICCARM__
 #pragma data_alignment=4
@@ -51,7 +54,7 @@ static struct eth_descriptor rx_desc[RX_DESCRIPTOR_NUM];
 static struct eth_descriptor tx_desc[TX_DESCRIPTOR_NUM];
 #else
 
-#if DEF_USE_SRAM
+#ifdef REG_SRAM_ADDR_RX_DESCRIPTOR
 	static struct eth_descriptor* rx_desc = (struct eth_descriptor*)REG_SRAM_ADDR_RX_DESCRIPTOR;
 #else
 	static struct eth_descriptor rx_desc[RX_DESCRIPTOR_NUM] __attribute__ ((aligned(4)));
@@ -61,8 +64,10 @@ static struct eth_descriptor tx_desc[TX_DESCRIPTOR_NUM] __attribute__ ((aligned(
 #endif
 static struct eth_descriptor volatile *cur_tx_desc_ptr, *cur_rx_desc_ptr, *fin_tx_desc_ptr;
 
-#if DEF_USE_SRAM
+#if defined(REG_SRAM_ADDR_RX_DATABUF)
 	static u8_t* rx_buf = (u8_t*)REG_SRAM_ADDR_RX_DATABUF;
+#elif defined(DEF_SPECIFY_DRAM_ADDR)
+	static u8_t* rx_buf = (u8_t*)DEF_SPECIFY_DRAM_ADDR;
 #else
 	static u8_t rx_buf[RX_DESCRIPTOR_NUM][PACKET_BUFFER_SIZE];
 #endif
@@ -113,17 +118,12 @@ static int reset_phy(void)
         sysprintf("Reset phy failed\n");
         return(-1);
     }
-#if 1
+
     mdio_write(CONFIG_PHY_ADDR, MII_ADVERTISE, ADVERTISE_CSMA |
                ADVERTISE_10HALF |
                ADVERTISE_10FULL |
                ADVERTISE_100HALF |
                ADVERTISE_100FULL);
-#else
-		    mdio_write(CONFIG_PHY_ADDR, MII_ADVERTISE, ADVERTISE_CSMA |
-               ADVERTISE_10HALF |
-               ADVERTISE_10FULL );
-#endif
 		
     reg = mdio_read(CONFIG_PHY_ADDR, MII_BMCR);
     mdio_write(CONFIG_PHY_ADDR, MII_BMCR, reg | BMCR_ANRESTART);
@@ -189,12 +189,14 @@ static void init_rx_desc(void)
 
     for(i = 0; i < RX_DESCRIPTOR_NUM; i++) {
         rx_desc[i].status1 = OWNERSHIP_EMAC;
-#if DEF_USE_SRAM
-        rx_desc[i].buf = (unsigned char *)((UINT)(&rx_buf[i*PACKET_BUFFER_SIZE]));
-#else
-        rx_desc[i].buf = (unsigned char *)((UINT)(&rx_buf[i][0]) | 0x80000000);
-#endif
-        rx_desc[i].status2 = 0;
+
+				#if defined(REG_SRAM_ADDR_RX_DATABUF) || defined(DEF_SPECIFY_DRAM_ADDR)
+					rx_desc[i].buf = (unsigned char *)((UINT)(&rx_buf[i*PACKET_BUFFER_SIZE]));
+				#else
+					rx_desc[i].buf = (unsigned char *)((UINT)(&rx_buf[i][0]) | 0x80000000);
+				#endif
+
+				rx_desc[i].status2 = 0;
         rx_desc[i].next = (struct eth_descriptor *)((UINT)(&rx_desc[(i + 1) % RX_DESCRIPTOR_NUM]) | 0x80000000);
 				sysprintf("[%s]No.%d RX descriptor is at 0x%x, buf at 0x%x\n", __func__, i, (unsigned int)&rx_desc[i], rx_desc[i].buf );
     }
@@ -287,8 +289,9 @@ void ETH0_RX_NAPI_SIM (void)
 		int rx_counter=0;
 		int complete=0;
 
-		if ( napi_sechdule == 0 ) return;
-    
+		if ( napi_sechdule == 0 )
+				return;
+	
     while ( rx_counter < DEF_NAPI_RX_WEIGHT ) {
 			
         status = cur_rx_desc_ptr->status1;
@@ -307,8 +310,8 @@ void ETH0_RX_NAPI_SIM (void)
 							if ( (g_rx_packet_count%3) ==0)
 								ethernetif_input0(length, cur_rx_desc_ptr->buf);	
 						#else
-							ethernetif_input0(length, cur_rx_desc_ptr->buf);	
 						//Slow it
+							ethernetif_input0(length, cur_rx_desc_ptr->buf);	
 							CPU_Delay();
 						#endif
 						g_rx_packet_count++;		

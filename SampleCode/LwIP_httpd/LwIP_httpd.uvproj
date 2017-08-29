@@ -151,7 +151,7 @@
             <CpuDllArguments></CpuDllArguments>
             <PeripheralDll></PeripheralDll>
             <PeripheralDllArguments></PeripheralDllArguments>
-            <InitializationFile>..\..\Script\InitDDR2.ini</InitializationFile>
+            <InitializationFile>..\..\Script\wb512.ini</InitializationFile>
             <Driver>Segger\JLTAgdi.dll</Driver>
           </TargetDlls>
         </DebugOption>
